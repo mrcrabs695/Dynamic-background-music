@@ -162,25 +162,20 @@ class DynamicAudioPlayer:
         
         self.update_activity_timer = QTimer()
         self.update_activity_timer.setInterval(1000)
+        self.update_activity_timer.timeout.connect(self.calculate_activity)
         self.update_activity_timer.timeout.connect(self.check_activity)
         self.update_activity_timer.start()
-        self.primary_player.durationChanged.connect(self.set_current_chunk)
+        self.transition_timeout = QTimer()
+        self.transition_timeout.setInterval(5000)
+        self.transition_timeout.setSingleShot(True)
+        self.primary_player.positionChanged.connect(self.set_current_chunk)
         self.primary_player.play_fade_in()
         
     def calculate_kps(self, key):
-        print(f"time since last key press: {time() - self.last_keypress}")
-        print(f"key pressed: {key}")
         self.current_key_presses = self.current_key_presses + 1
-        print(f"key presses this second: {self.current_key_presses}")
-        if self.last_keypress + 1 < time():
-            self.kps = self.current_key_presses
-            self.current_key_presses = 0
-            self.calculate_average_kps()
-            self.last_keypress = time()
     
     def calculate_average_kps(self):
         self.average_kps = int((self.last_kps + self.kps) / 2)
-        print(f"average kps: {self.average_kps}")
     
     def calculate_activity(self):
         if self.average_kps >= 0:
@@ -196,14 +191,14 @@ class DynamicAudioPlayer:
         print(f"last activity level: {self.last_activity}")
     
     def set_current_chunk(self, current_duration):
-        current_duration = current_duration / 100
+        current_duration = current_duration / 1000
         current_chunk = None
         current_subchunk = None
-        for chunk_name, chunk in self.audio_chunks:
+        for chunk_name, chunk in self.audio_chunks.items():
             if current_duration > chunk.start_time and current_duration < chunk.end_time:
                 current_chunk = chunk_name
                 
-                for subchunk_name, subchunk in chunk.subchunks:
+                for subchunk_name, subchunk in chunk.subchunks.items():
                     if current_duration > subchunk.start_time and current_duration < subchunk.end_time:
                         current_subchunk = subchunk_name
         if current_chunk != None:
@@ -213,65 +208,62 @@ class DynamicAudioPlayer:
         print(f"current subchunk: {self.current_subchunk}")
     
     def check_activity(self):
-        self.calculate_activity()
+        if self.last_keypress + 1 < time():
+            self.kps = self.current_key_presses
+            self.current_key_presses = 0
+            self.calculate_average_kps()
+            self.last_keypress = time()
+        
+        if self.is_transitioning:
+            return
+
         current_chunk = self.audio_chunks[self.current_chunk]
-        if self.activity == 0 and self.last_activity == 1:
-            self.transition(current_chunk, self.primary_player.position(), self.audio_chunks["low activity 1"])
-        elif self.activity == 0 and self.last_activity == 2:
-            self.transition(current_chunk, self.primary_player.position(), self.audio_chunks["low activity 1"])
+        current_subchunk = self.audio_chunks[self.current_chunk].subchunks[self.current_subchunk]
+        for chunk in self.audio_chunks.values():
+            if chunk.activity_needed == self.activity:
+                current_activity_chunk = chunk
+        
+        if self.activity == 0 and self.last_activity == 1 or self.activity == 0 and self.last_activity == 2:
+            self.last_activity = self.activity
+            self.transition(current_subchunk, self.primary_player.position(), self.audio_chunks["low activity 1"])
         elif self.activity == 1 and self.last_activity == 0:
-            self.transition(current_chunk, self.primary_player.position(), self.audio_chunks["medium activity 1"])
+            self.last_activity = self.activity
+            self.transition(current_subchunk, self.primary_player.position(), self.audio_chunks["medium activity 1"])
         elif self.activity == 1 and self.last_activity == 2:
-            self.transition(current_chunk, self.primary_player.position(), self.audio_chunks["medium activity 1"].subchunks["chunk 2"])
-        elif self.activity == 2 and self.last_activity == 1:
-            self.transition(current_chunk, self.primary_player.position(), self.audio_chunks["high activity 1"])
-        elif self.activity == 2 and self.last_activity == 0:
-            self.transition(current_chunk, self.primary_player.position(), self.audio_chunks["high activity 1"])
+            self.last_activity = self.activity
+            self.transition(current_subchunk, self.primary_player.position(), self.audio_chunks["medium activity 1"].subchunks["chunk 2"])
+        elif self.activity == 2 and self.last_activity == 1 or self.activity == 2 and self.last_activity == 0:
+            self.last_activity = self.activity
+            self.transition(current_subchunk, self.primary_player.position(), self.audio_chunks["high activity 1"])
         #? test to see if a smooth loop transition sounds good
-        elif self.activity == self.last_activity and self.primary_player.position() / 100 == current_chunk.end_time - 1:
-            loop_start_chunk = [chunk for chunk in current_chunk.subchunks if chunk.loop_start == True][0]
-            self.transition(current_chunk, self.primary_player.position(loop_start_chunk), loop_start_chunk)
+        elif self.activity == self.last_activity and self.primary_player.position() / 1000 == current_chunk.end_time - 1 or self.primary_player.position() > current_activity_chunk.end_time * 1000:
+            loop_start_chunk = [chunk for chunk in current_activity_chunk.subchunks.values() if chunk.loop_start == True][0]
+            self.transition(current_subchunk, self.primary_player.position(), loop_start_chunk)
             
     def loop_chunk(self, current_duration, chunk):
         if current_duration == chunk.end_time :
             self.primary_player.setPosition(chunk.start_time)
         
     def transition(self, start_chunk, current_duration, end_chunk):
-        current_duration = current_duration / 100
+        current_duration = current_duration / 1000
         print("transition time")
         print(f"start chunk: {start_chunk}")
         print(f"current position: {current_duration}")
         print(f"end chunk: {end_chunk}")
         self.is_transitioning = True
-        self.chunk_to_transition_to = end_chunk
-        @Slot()
-        def wait_for_end_of_chunk(duration):
-            duration = duration / 100
-            if duration == start_chunk.end_time - 1 or duration > start_chunk.end_time:
-                self.primary_player.pause_fade_out()
-                self.secondary_player.setPosition(int(end_chunk.start_time * 100))
-                self.secondary_player.play_fade_in()
-                new_primary_player = self.secondary_player
-                new_secondary_player = self.primary_player
-                self.primary_player = new_primary_player
-                self.secondary_player = new_secondary_player
-                self.primary_player.positionChanged.disconnect(wait_for_end_of_chunk)
-                self.is_transitioning = False
-                self.chunk_to_transition_to = None
         
-        if start_chunk.end_time - current_duration > 4:
-            self.primary_player.pause_fade_out()
-            self.secondary_player.setPosition(int(end_chunk.start_time * 100))
-            self.secondary_player.play_fade_in()
-            new_primary_player = self.secondary_player
-            new_secondary_player = self.primary_player
-            self.primary_player = new_primary_player
-            self.secondary_player = new_secondary_player
+        def not_transition():
             self.is_transitioning = False
-            self.chunk_to_transition_to = None
-        else:
-            self.primary_player.positionChanged.connect(wait_for_end_of_chunk)
-
+        self.transition_timeout.timeout.connect(not_transition)
+        
+        self.primary_player.pause_fade_out()
+        self.secondary_player.setPosition(int(end_chunk.start_time * 1000))
+        self.secondary_player.play_fade_in()
+        new_primary_player = self.secondary_player
+        new_secondary_player = self.primary_player
+        self.primary_player = new_primary_player
+        self.secondary_player = new_secondary_player
+        self.transition_timeout.start()
         
 
 class MainWindow(QMainWindow):
