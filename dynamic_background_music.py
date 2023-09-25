@@ -72,18 +72,25 @@ class AudioSubChunk:
         self.transition = transition
 
 class AudioChunk:
-    def __init__(self, start_time:float, end_time:float, activity_needed:int, subchunks:dict):
+    def __init__(self, start_time:float, end_time:float, intensity_start:float, intensity_end:float, subchunks:dict):
         #* each chunk must have AT LEAST a start and an end subchunk, transition chunks are optional
         self.start_time = start_time
         self.end_time = end_time
-        self.activity_needed = activity_needed
+        self.intensity_start = intensity_start
+        self.intensity_end = intensity_end
         
         #? i have subchunks so its smoother to transition between different activity levels
         self.subchunks = subchunks
+        
+        for subchunk in subchunks:
+            if subchunk.loop_start:
+                self.loop_start = subchunk
+            if subchunk.loop_end:
+                self.loop_end = subchunk
 
 
     def __str__(self):
-        return f"active_needed: {self.activity_needed} - start_time: {self.start_time} - chunk_count: {len(self.subchunks)}"
+        return f"active_needed: {self.intensity_start} - start_time: {self.start_time} - chunk_count: {len(self.subchunks)}"
 
 
 class WorkerSignals(QObject):
@@ -103,12 +110,15 @@ class KeyPressThread(QRunnable):
             try:
                 listener.join()
             except:
-                self.signals.error.emit(traceback.print_exc())
+                self.signals.error.emit(traceback.format_exc())
 
-class DynamicAudioPlayer:
-    def __init__(self):
+class DynamicAudioPlayer(QObject):
+    primary_player_pos_changed = Signal(float)
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(args, kwargs)
         self.audio_chunks = {
-            "low activity 1": AudioChunk(0.0, 41.6, 0, {
+            "low activity 1": AudioChunk(0.0, 41.6, 0, 5, {
                 "start chunk": AudioSubChunk(0.0, 5.0),
                 "chunk 2": AudioSubChunk(5.0, 10.6, True),
                 "chunk 3": AudioSubChunk(10.6, 16.2),
@@ -118,7 +128,7 @@ class DynamicAudioPlayer:
                 "end chunk": AudioSubChunk(34.6, 41.6, loop_end=True),
             }),
             
-            "medium activity 1": AudioChunk(41.6, 70.0, 1, {
+            "medium activity 1": AudioChunk(41.6, 70.0, 5, 15, {
                 "start chunk": AudioSubChunk(41.6, 48.1, True),
                 "chunk 2": AudioSubChunk(48.1, 55.4),
                 "chunk 3": AudioSubChunk(55.4, 59.2),
@@ -127,7 +137,7 @@ class DynamicAudioPlayer:
             }),
             
             #? the chunks here use 2 decimal points for smoother transitions
-            "high activity 1": AudioChunk(70.0, 108.4, 2, {
+            "high activity 1": AudioChunk(70.0, 108.4, 15, 20, {
                 "start chunk": AudioSubChunk(70.0, 75.66),
                 "chunk 2": AudioSubChunk(75.66, 77.73, True),
                 "chunk 3": AudioSubChunk(77.73, 81.12),
@@ -143,55 +153,70 @@ class DynamicAudioPlayer:
         
         self._player_1 = Player()
         self._player_2 = Player()
+        self._current_key_presses = 0 #? key presses per second
+        self._last_kps = 0
+        self._kps = 0
+        self._last_keypress = time()
+        
         self.primary_player = self._player_1
         self.secondary_player = self._player_2
-        
-        self.activity = 0
-        self.last_activity = 0
-        self.music_intensity = 0
-        self.current_key_presses = 0 #? key presses per second
-        self.last_kps = 0
-        self.kps = 0
-        self.average_kps = 0
-        self.last_keypress = time()
-        
         self.current_chunk = "low activity 1"
         self.current_subchunk = "start chunk"
+        self.set_player_pos(self.primary_player, self.audio_chunks[self.current_chunk].start_time)
+        self.primary_player.positionChanged.connect(self.emit_primary_player_pos_changed)
+        self.primary_player_pos_changed.connect(self.set_current_chunk)
+        
+        self.music_intensity = 0.0
+        self.average_kps = 0
+        
         self.chunk_to_transition_to = None
         self.is_transitioning = False
         
-        self.update_activity_timer = QTimer()
-        self.update_activity_timer.setInterval(1000)
-        self.update_activity_timer.timeout.connect(self.calculate_activity)
-        self.update_activity_timer.timeout.connect(self.check_activity)
-        self.update_activity_timer.start()
+        self.update_activity = QTimer()
+        self.update_activity.setInterval(1000)
+        self.update_activity.timeout.connect(self.decay_music_intensity)
+        self.update_activity.start()
+        
         self.transition_timeout = QTimer()
         self.transition_timeout.setInterval(5000)
         self.transition_timeout.setSingleShot(True)
-        self.primary_player.positionChanged.connect(self.set_current_chunk)
+        self.transition_timeout.timeout.connect(self.not_transitioning)
+        
         self.primary_player.play_fade_in()
         
-    def calculate_kps(self, key):
-        self.current_key_presses = self.current_key_presses + 1
+    #? util functions to translate the time differences between the media player and the defined audio chunks
+    def set_player_pos(self, player:Player, pos:float):
+        player.setPosition(int(pos * 1000))
+
+    def player_pos(self, player:Player):
+        return player.position() / 1000
     
-    def calculate_average_kps(self):
-        self.average_kps = int((self.last_kps + self.kps) / 2)
+    def emit_primary_player_pos_changed(self, pos:int):
+        self.primary_player_pos_changed.emit(pos / 1000)
+    ###
+        
+    def increase_music_intensity(self):
+        if self.average_kps > 6 and self.music_intensity < 20:
+            self.music_intensity += 2
+        elif self.music_intensity < 20:
+            self.music_intensity += 1
     
-    def calculate_activity(self):
-        if self.average_kps >= 0:
-            self.last_activity = self.activity
-            self.activity = 0
-        if self.average_kps >= 3:
-            self.last_activity = self.activity
-            self.activity = 1
-        if self.average_kps > 5:
-            self.last_activity = self.activity
-            self.activity = 2
-        print(f"current activity level: {self.activity}")
-        print(f"last activity level: {self.last_activity}")
+    def decay_music_intensity(self):
+        if self.music_intensity > 0 and self._last_keypress + 5 < time():
+            self.music_intensity -= 4
     
-    def set_current_chunk(self, current_duration):
-        current_duration = current_duration / 1000
+    def calculate_activity(self, key):
+        self._current_key_presses += 1
+        if self._last_keypress + 1 < time():
+            self._kps = self._current_key_presses
+            self._current_key_presses = 0
+            self._last_kps = self._kps
+            self.average_kps = int((self._last_kps + self._kps) / 2)
+            self._last_keypress = time()
+            
+        self.increase_music_intensity()
+    
+    def set_current_chunk(self, current_duration:float):
         current_chunk = None
         current_subchunk = None
         for chunk_name, chunk in self.audio_chunks.items():
@@ -204,60 +229,23 @@ class DynamicAudioPlayer:
         if current_chunk != None:
             self.current_chunk = current_chunk
             self.current_subchunk = current_subchunk
-        print(f"current chunk: {self.current_chunk}")
-        print(f"current subchunk: {self.current_subchunk}")
-    
-    def check_activity(self):
-        if self.last_keypress + 1 < time():
-            self.kps = self.current_key_presses
-            self.current_key_presses = 0
-            self.calculate_average_kps()
-            self.last_keypress = time()
+        # print(f"current chunk: {self.current_chunk}")
+        # print(f"current subchunk: {self.current_subchunk}")
         
+    def not_transitioning(self):
+            self.is_transitioning = False
+        
+    def transition(self, start_chunk:AudioChunk|AudioSubChunk, current_duration:float, end_chunk:AudioChunk|AudioSubChunk):
         if self.is_transitioning:
             return
-
-        current_chunk = self.audio_chunks[self.current_chunk]
-        current_subchunk = self.audio_chunks[self.current_chunk].subchunks[self.current_subchunk]
-        for chunk in self.audio_chunks.values():
-            if chunk.activity_needed == self.activity:
-                current_activity_chunk = chunk
-        
-        if self.activity == 0 and self.last_activity == 1 or self.activity == 0 and self.last_activity == 2:
-            self.last_activity = self.activity
-            self.transition(current_subchunk, self.primary_player.position(), self.audio_chunks["low activity 1"])
-        elif self.activity == 1 and self.last_activity == 0:
-            self.last_activity = self.activity
-            self.transition(current_subchunk, self.primary_player.position(), self.audio_chunks["medium activity 1"])
-        elif self.activity == 1 and self.last_activity == 2:
-            self.last_activity = self.activity
-            self.transition(current_subchunk, self.primary_player.position(), self.audio_chunks["medium activity 1"].subchunks["chunk 2"])
-        elif self.activity == 2 and self.last_activity == 1 or self.activity == 2 and self.last_activity == 0:
-            self.last_activity = self.activity
-            self.transition(current_subchunk, self.primary_player.position(), self.audio_chunks["high activity 1"])
-        #? test to see if a smooth loop transition sounds good
-        elif self.activity == self.last_activity and self.primary_player.position() / 1000 == current_chunk.end_time - 1 or self.primary_player.position() > current_activity_chunk.end_time * 1000:
-            loop_start_chunk = [chunk for chunk in current_activity_chunk.subchunks.values() if chunk.loop_start == True][0]
-            self.transition(current_subchunk, self.primary_player.position(), loop_start_chunk)
-            
-    def loop_chunk(self, current_duration, chunk):
-        if current_duration == chunk.end_time :
-            self.primary_player.setPosition(chunk.start_time)
-        
-    def transition(self, start_chunk, current_duration, end_chunk):
-        current_duration = current_duration / 1000
-        print("transition time")
+        print("transition time!")
         print(f"start chunk: {start_chunk}")
         print(f"current position: {current_duration}")
         print(f"end chunk: {end_chunk}")
         self.is_transitioning = True
         
-        def not_transition():
-            self.is_transitioning = False
-        self.transition_timeout.timeout.connect(not_transition)
-        
         self.primary_player.pause_fade_out()
-        self.secondary_player.setPosition(int(end_chunk.start_time * 1000))
+        self.set_player_pos(self.secondary_player, end_chunk.start_time)
         self.secondary_player.play_fade_in()
         new_primary_player = self.secondary_player
         new_secondary_player = self.primary_player
@@ -265,6 +253,7 @@ class DynamicAudioPlayer:
         self.secondary_player = new_secondary_player
         self.transition_timeout.start()
         
+    
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -335,7 +324,7 @@ app = QApplication(sys.argv)
 title = "OpGX dynamic music player"
 test = DynamicAudioPlayer()
 key_press_thread = KeyPressThread()
-key_press_thread.signals.result.connect(test.calculate_kps)
+key_press_thread.signals.result.connect(test.calculate_activity)
 thread_manager.threadpool.start(key_press_thread)
 
 
