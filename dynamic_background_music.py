@@ -106,15 +106,15 @@ class KeyPressThread(QRunnable):
             if not self.has_quit:
                 self.signals.result.emit(key)
         
-        def quit():
+        def stop():
             self.has_quit = True
             self.signals.finished.emit()
             self.setAutoDelete(True)
-            return False
+            quit()
         
         hotkey = pynput.keyboard.HotKey(
             pynput.keyboard.HotKey.parse('<ctrl>+<alt>+<pause>'),
-            quit
+            stop
         )
         
         with pynput.keyboard.Listener(on_release=on_key_release, on_press=hotkey.press) as listener:
@@ -123,7 +123,8 @@ class KeyPressThread(QRunnable):
             except KeyboardInterrupt as exception:
                 if not self.has_quit:
                     self.signals.error.emit(exception)
-
+            except:
+                quit()
 class DynamicAudioPlayer(QObject):
     primary_player_pos_changed = Signal(float)
     
@@ -379,7 +380,6 @@ def on_exit():
     app.exit()
     thread_manager.threadpool.clear()
     sys.exit()
-    raise Exception("Did not stop normally")
 
 def raise_error(error):
     raise error
