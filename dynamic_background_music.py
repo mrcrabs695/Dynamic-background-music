@@ -93,21 +93,36 @@ class AudioChunk:
 class WorkerSignals(QObject):
     result = Signal(object)
     finished = Signal()
-    error = Signal(str)
+    error = Signal(Exception)
 
 class KeyPressThread(QRunnable):
     signals = WorkerSignals()
     
     @Slot()
     def run(self):
-        print("run")
+        self.has_quit = False
+        # print("run")
         def on_key_release(key):
-            self.signals.result.emit(key)
-        with pynput.keyboard.Listener(on_release=on_key_release) as listener:
+            if not self.has_quit:
+                self.signals.result.emit(key)
+        
+        def quit():
+            self.has_quit = True
+            self.signals.finished.emit()
+            self.setAutoDelete(True)
+            return False
+        
+        hotkey = pynput.keyboard.HotKey(
+            pynput.keyboard.HotKey.parse('<ctrl>+<alt>+<pause>'),
+            quit
+        )
+        
+        with pynput.keyboard.Listener(on_release=on_key_release, on_press=hotkey.press) as listener:
             try:
                 listener.join()
-            except:
-                self.signals.error.emit(traceback.format_exc())
+            except KeyboardInterrupt as exception:
+                if not self.has_quit:
+                    self.signals.error.emit(exception)
 
 class DynamicAudioPlayer(QObject):
     primary_player_pos_changed = Signal(float)
@@ -200,16 +215,16 @@ class DynamicAudioPlayer(QObject):
     def increase_music_intensity(self):
         if self.music_intensity < 40:
             self.music_intensity += self.music_intensity_modifier
-            print("increase music intensity by 1")
-            print(f"music intensity: {self.music_intensity}")
+            # print("increase music intensity by 1")
+            # print(f"music intensity: {self.music_intensity}")
     
     def decay_music_intensity(self):
         if self.is_transitioning:
             return
         
         if self.music_intensity > 0 and self._last_keypress + 5 < time():
-            print("decay music intensity")
-            print(f"music intensity: {self.music_intensity}")
+            # print("decay music intensity")
+            # print(f"music intensity: {self.music_intensity}")
             self.music_intensity -= self.decay_modifier
     
     def calculate_activity(self, key):
@@ -252,10 +267,10 @@ class DynamicAudioPlayer(QObject):
         if self.is_transitioning:
             return
         
-        print("transition time!")
-        print(f"start chunk: {start_chunk}")
-        print(f"current position: {current_duration}")
-        print(f"end chunk: {end_chunk}")
+        # print("transition time!")
+        # print(f"start chunk: {start_chunk}")
+        # print(f"current position: {current_duration}")
+        # print(f"end chunk: {end_chunk}")
         self.is_transitioning = True
         self.transition_timeout.start()
         
@@ -276,12 +291,12 @@ class DynamicAudioPlayer(QObject):
         for name, chunk in self.audio_chunks.items():
             
             if transition_to_next_chunk:
-                print("went to next chunk")
+                # print("went to next chunk")
                 self.transition(self.current_subchunk, self.player_pos(self.primary_player), chunk)
                 return
             
             if self.music_intensity > chunk.intensity_start and self.music_intensity < chunk.intensity_end and self.player_pos(self.primary_player) >= chunk.loop_end.start_time - 1:
-                print("looping")
+                # print("looping")
                 self.transition(self.current_subchunk, self.player_pos(self.primary_player), chunk.loop_start)
                 return
             
@@ -292,7 +307,7 @@ class DynamicAudioPlayer(QObject):
                 
             elif self.music_intensity < chunk.intensity_start and self.music_intensity < chunk.intensity_end:
                 if name == self.current_chunk_name:
-                    print("went to previous chunk")
+                    # print("went to previous chunk")
                     self.transition(self.current_subchunk, self.player_pos(self.primary_player), last_chunk)
                     return
             last_chunk = chunk
@@ -360,13 +375,22 @@ class MainWindow(QMainWindow):
     def set_current_vol(self, vol):
         self.player.current_volume = vol
 
+def on_exit():
+    app.exit()
+    thread_manager.threadpool.clear()
+    sys.exit()
+    raise Exception("Did not stop normally")
 
+def raise_error(error):
+    raise error
 
 app = QApplication(sys.argv)
 title = "OpGX dynamic music player"
 test = DynamicAudioPlayer()
 key_press_thread = KeyPressThread()
 key_press_thread.signals.result.connect(test.calculate_activity)
+key_press_thread.signals.finished.connect(lambda: app.exit())
+key_press_thread.signals.error.connect(raise_error)
 thread_manager.threadpool.start(key_press_thread)
 
 
